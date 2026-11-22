@@ -534,6 +534,23 @@ async function loadDB(){
   if(fromLS&&!useLS){try{await idbSet(STORAGE_KEY,raw);localStorage.removeItem(STORAGE_KEY)}catch(e){useLS=true}}
   try{navigator.storage&&navigator.storage.persist&&navigator.storage.persist()}catch(e){}
 }
+async function saveImg(id,data){if(useLS)return;try{await idbSet("img_"+id,data)}catch(e){console.warn("image not persisted",e)}}
+async function getMsgImage(m){
+  if(!m||!m.hasImage)return null;
+  if(m._img)return m._img;
+  try{const d=await idbGet("img_"+m.id);if(d){m._img=d;return d}}catch(e){}
+  return null;
+}
+async function gcImages(){
+  try{
+    const d=await getIDB();
+    const keys=await new Promise((res,rej)=>{const q=d.transaction("kv").objectStore("kv").getAllKeys();q.onsuccess=()=>res(q.result);q.onerror=()=>rej(q.error)});
+    const live=new Set();database.chats.forEach(c=>c.messages.forEach(m=>{if(m.hasImage)live.add("img_"+m.id)}));
+    const dead=keys.filter(k=>typeof k==="string"&&k.indexOf("img_")===0&&!live.has(k));
+    if(!dead.length)return;
+    await new Promise((res,rej)=>{const t=d.transaction("kv","readwrite"),st=t.objectStore("kv");dead.forEach(k=>st.delete(k));t.oncomplete=res;t.onerror=()=>rej(t.error)});
+  }catch(e){}
+}
 let currentId=null,busy=false,attachedImage=null,attachedFiles=[],genToken=0,genChatId=null,genMode="chat",storageWarned=false;
 
 function saveDB(){clearTimeout(saveTimer);saveTimer=setTimeout(flushDB,250)}
@@ -858,12 +875,14 @@ async function sendMessage(preset){
   const selectedModel=$("model").value;
   if((activeMode==="chat"||activeMode==="search")&&!selectedModel){toast("هنوز مدلی از Puter بارگذاری نشده.",{type:"error"});return}
   if(["image","video","audio"].includes(activeMode)&&!selectedMediaModel){toast("اول یه مدل انتخاب کن.",{type:"error"});openModelPicker();return}
+  if(activeMode==="image"&&attachedImage&&!text){toast("برای ویرایش تصویر، توضیح بنویس که چی تغییر کنه.",{type:"error"});return}
   if(!getCurrent())newChat();
+  if(attachedFiles.length&&activeMode!=="chat"&&activeMode!=="search")toast("فایل‌های متنی فقط در حالت گفتگو و جستجو خونده می‌شن.");
   const chat=getCurrent(),img=attachedImage;
   const files=attachedFiles.map(f=>({name:f.name,size:f.size,text:f.text}));
   const msg={id:uid(),role:"user",content:text||(files.length?"فایل پیوست‌شده را بررسی کن.":"تصویر پیوست‌شده را بررسی کن."),ts:Date.now()};
   if(files.length)msg.files=files;
-  if(img){msg.hasImage=true;msg._img=img;msg.thumb=await makeThumb(img)}
+  if(img){msg.hasImage=true;msg._img=img;msg.thumb=await makeThumb(img);saveImg(msg.id,img)}
   chat.messages.push(msg);
   if(chat.messages.length===1)chat.title=msg.content.slice(0,40);
   chat.updated=Date.now();
@@ -880,19 +899,31 @@ async function runAssistant(chat,animFromUser){
   const mode=activeMode,selectedModel=$("model").value,media=selectedMediaModel;
   let reply;
   try{
+    const refImg=await getMsgImage(lastUser);
     if(mode==="image"){
-      const r=await puter.ai.txt2img(text,{model:media.id});
-      reply={role:"assistant",content:"تصویر ساخته شد.",mediaType:"image",mediaUrl:r?.src||r?.url||""};
+      const opts={model:media.id};
+      if(refImg){
+        const mm=/^data:([^;]+);base64,(.+)$/.exec(refImg);
+        if(mm){opts.input_image=mm[2];opts.input_image_mime_type=mm[1]}
+      }
+      const r=await puter.ai.txt2img(text,opts);
+      const u=r?.src||r?.url||"";
+      if(!u)throw new Error("خروجی تصویر خالی برگشت.");
+      reply={role:"assistant",content:refImg?"تصویر ویرایش شد.":"تصویر ساخته شد.",mediaType:"image",mediaUrl:u};
     }else if(mode==="video"){
-      const r=await puter.ai.txt2vid(text,{model:media.id});
-      reply={role:"assistant",content:"ویدیو آماده شد.",mediaType:"video",mediaUrl:r?.src||r?.url||""};
+      const opts={model:media.id};
+      if(refImg)opts.input_reference=refImg;
+      const r=await puter.ai.txt2vid(text,opts);
+      const u=r?.src||r?.url||"";
+      if(!u)throw new Error("خروجی ویدیو خالی برگشت.");
+      reply={role:"assistant",content:"ویدیو آماده شد.",mediaType:"video",mediaUrl:u};
     }else if(mode==="audio"){
       const a=await puter.ai.txt2speech(text,{...media.tts});
       reply={role:"assistant",content:"فایل صوتی آماده شد.",mediaType:"audio",mediaUrl:a?.src||a?.currentSrc||""};
     }else{
       const ctx=chat.messages.filter(m=>!m.error&&m.content).map(m=>({role:m.role,content:withFiles(m)}));
       const messages=[{role:"system",content:database.systemPrompt},...ctx];
-      const r=(lastUser&&lastUser._img)?await puter.ai.chat(messages,lastUser._img,{model:selectedModel}):await puter.ai.chat(messages,{model:selectedModel});
+      const r=refImg?await puter.ai.chat(messages,refImg,{model:selectedModel}):await puter.ai.chat(messages,{model:selectedModel});
       reply={role:"assistant",content:getResponseText(r)};
     }
   }catch(error){
@@ -915,11 +946,11 @@ promptInput.addEventListener("keydown",e=>{
 });
 promptInput.addEventListener("paste",e=>{
   const items=e.clipboardData&&e.clipboardData.items;if(!items)return;
-  for(const it of items){if(it.kind==="file"){const f=it.getAsFile();if(f){e.preventDefault();if(f.type&&f.type.startsWith("image/"))handleImageFile(f);else handleDocFile(f);return}}}
+  for(const it of items){if(it.kind==="file"){const f=it.getAsFile();if(f){e.preventDefault();if(isImageFile(f))handleImageFile(f);else handleDocFile(f);return}}}
 });
 $("imageInput").addEventListener("change",async function(){
   const list=[...this.files];this.value="";
-  for(const f of list){if(f.type&&f.type.startsWith("image/"))handleImageFile(f);else await handleDocFile(f)}
+  for(const f of list){if(isImageFile(f))await handleImageFile(f);else await handleDocFile(f)}
 });
 const MAX_FILE_CHARS=300000;
 function fmtSize(n){return n<1024?n+" B":n<1048576?(n/1024).toFixed(n<10240?1:0)+" KB":(n/1048576).toFixed(1)+" MB"}
@@ -967,11 +998,28 @@ function renderAttachments(){
   el.style.display=attachedFiles.length?"flex":"none";
 }
 $("file-list").addEventListener("click",e=>{const b=e.target.closest("[data-rm]");if(!b)return;attachedFiles.splice(+b.dataset.rm,1);renderAttachments();updateSendState()});
-function handleImageFile(file){
-  if(!file.type.startsWith("image/")){toast("فقط فایل تصویری انتخاب کن.",{type:"error"});return}
-  const r=new FileReader();
-  r.onload=()=>{attachedImage=r.result;$("preview-img").src=attachedImage;$("image-preview").style.display="flex";updateSendState()};
-  r.readAsDataURL(file);
+const MAX_IMG_SIDE=2048,MAX_IMG_BYTES=2*1024*1024;
+function isImageFile(f){return !!f&&((f.type&&f.type.indexOf("image/")===0)||/\.(png|jpe?g|webp|gif|bmp|heic|heif|avif)$/i.test(f.name||""))}
+function readAsDataURL(file){return new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=()=>rej(r.error||new Error("read"));r.readAsDataURL(file)})}
+function loadImg(src){return new Promise((res,rej)=>{const i=new Image();i.onload=()=>res(i);i.onerror=()=>rej(new Error("decode"));i.src=src})}
+async function prepareImage(file){
+  const raw=await readAsDataURL(file);
+  try{
+    const img=await loadImg(raw),w=img.naturalWidth,h=img.naturalHeight;
+    const okType=/^image\/(png|jpe?g|webp)$/i.test(file.type||"");
+    if(okType&&file.size<=MAX_IMG_BYTES&&Math.max(w,h)<=MAX_IMG_SIDE)return raw;
+    const sc=Math.min(1,MAX_IMG_SIDE/Math.max(w,h)),c=document.createElement("canvas");
+    c.width=Math.max(1,Math.round(w*sc));c.height=Math.max(1,Math.round(h*sc));
+    const ctx=c.getContext("2d");ctx.fillStyle="#fff";ctx.fillRect(0,0,c.width,c.height);ctx.drawImage(img,0,0,c.width,c.height);
+    return c.toDataURL("image/jpeg",.88);
+  }catch(e){return raw}
+}
+async function handleImageFile(file){
+  if(!isImageFile(file)){toast("فقط فایل تصویری انتخاب کن.",{type:"error"});return}
+  const replaced=!!attachedImage;
+  try{attachedImage=await prepareImage(file)}catch(e){toast("خوندن تصویر ناموفق بود.",{type:"error"});return}
+  $("preview-img").src=attachedImage;$("image-preview").style.display="flex";updateSendState();
+  if(replaced)toast("فقط یک تصویر در هر پیام ارسال می‌شه؛ تصویر قبلی جایگزین شد.");
 }
 function removeImage(){attachedImage=null;$("image-preview").style.display="none";$("preview-img").src="";updateSendState()}
 
@@ -1174,6 +1222,7 @@ async function loadModels(showNotice=false){
   await loadDB();
   if(database.chats.length)currentId=database.chats[0].id;else newChat();
   renderHistory();renderMessages();updateComposerMode();updateSendState();
+  gcImages();
   initPuterAuth();
 })();
 </script>
