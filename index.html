@@ -320,6 +320,8 @@ html{overflow:hidden;overscroll-behavior:none}
 }
 @media(max-width:380px){.sug{grid-template-columns:1fr}.chip span{display:none}.chip{padding:0 10px}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+.msg.streaming .md>:last-child::after{content:"";display:inline-block;width:7px;height:1em;margin-inline-start:3px;vertical-align:-2px;border-radius:2px;background:currentColor;opacity:.55;animation:nvcaret 1s steps(2,start) infinite}
+@keyframes nvcaret{to{visibility:hidden}}
 </style>
 </head>
 <body>
@@ -503,7 +505,8 @@ function identityPrompt(modelId){
   "- اسم تو «Nova AI» است.\n"+
   "- Nova AI را «امیرعلی»، یک نوجوان نابغه‌ی ایرانی ساخته است. امیرعلی صاحب شرکت «نوافورج» (NovaForge) هم هست. اگر کسی پرسید سازنده‌ات کیه یا کی ساختت، بگو امیرعلی و همین توضیحات را درباره‌اش بگو.\n"+
   "- اگر کسی پرسید چه مدلی هستی یا زیر پوست Nova AI کدوم مدل کار می‌کنه، اسم دقیق همین مدل را بگو: "+real+". این را انکار نکن و اسم مدل دیگری هم نگو.\n"+
-  "- امیرعلی اپ Nova AI را ساخته؛ نگو که خودش مدل پایه را آموزش داده یا ساخته.";
+  "- امیرعلی اپ Nova AI را ساخته؛ نگو که خودش مدل پایه را آموزش داده یا ساخته.\n\n"+
+  "قانون متن قابل‌کپی: هر وقت کاربر خواست متنی (مقاله، پست، ایمیل، README، توضیحات، پرامپت، یادداشت و...) برایش بنویسی یا گفت «مارک‌داون بده / قابل کپی / بذار کپی کنم»، کل خود متن را بدون هیچ توضیحی داخلش، فقط یک‌بار، داخل یک بلاک کد با برچسب markdown بده تا دکمه‌ی کپی داشته باشد. برای حصار بلاک از چهار بک‌تیک استفاده کن (````markdown ... ````) تا اگر داخل متن بلاک کد سه‌تایی هست خراب نشود. توضیح اضافه فقط بیرون از بلاک و کوتاه باشد.";
 }
 const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
 const timeFmt=new Intl.DateTimeFormat("fa-IR",{hour:"2-digit",minute:"2-digit"});
@@ -560,7 +563,7 @@ async function gcImages(){
     await new Promise((res,rej)=>{const t=d.transaction("kv","readwrite"),st=t.objectStore("kv");dead.forEach(k=>st.delete(k));t.oncomplete=res;t.onerror=()=>rej(t.error)});
   }catch(e){}
 }
-let currentId=null,busy=false,attachedImage=null,attachedFiles=[],genToken=0,genChatId=null,genMode="chat",storageWarned=false;
+let currentId=null,busy=false,attachedImage=null,attachedFiles=[],genToken=0,streamId=null,genChatId=null,genMode="chat",storageWarned=false;
 
 function saveDB(){clearTimeout(saveTimer);saveTimer=setTimeout(flushDB,250)}
 async function flushDB(){
@@ -621,7 +624,7 @@ function codeHTML(b){
 }
 function md(src){
   const blocks=[];
-  src=String(src||"").replace(/\r/g,"").replace(/```([\w+#.-]*)[^\S\n]*\n?([\s\S]*?)(```|$)/g,(_,lang,code)=>{blocks.push({lang,code:code.replace(/\n$/,"")});return "\n\u0000"+(blocks.length-1)+"\u0000\n"});
+  src=String(src||"").replace(/\r/g,"").replace(/(`{3,})([\w+#.-]*)[^\S\n]*\n?([\s\S]*?)(\1(?!`)|$)/g,(_,fence,lang,code)=>{blocks.push({lang,code:code.replace(/\n$/,"")});return "\n\u0000"+(blocks.length-1)+"\u0000\n"});
   const lines=escapeHTML(src).split("\n");
   let html="",i=0,para=[];
   const flush=()=>{if(para.length){html+='<p dir="auto">'+para.map(inlineMD).join("<br>")+"</p>";para=[]}};
@@ -760,7 +763,7 @@ function msgHTML(m,idx,animFrom,isLastAI){
   if(m.mediaType&&safeUrl(m.mediaUrl))acts+=actBtn("dl","download","دانلود");
   if(isLastAI)acts+=actBtn("regen","refresh","تولید دوباره");
   acts+=actBtn("del","trash","حذف","danger");
-  return '<div class="msg ai'+(m.error?" err":"")+inCls+(isLastAI?" last":"")+'" data-id="'+m.id+'"><div class="av">'+ico("sparkles")+'</div><div class="ai-body"><div class="who"><b>NOVA AI</b>'+(time?"<span>"+time+"</span>":"")+"</div>"+body+'<div class="acts">'+acts+"</div></div></div>";
+  return '<div class="msg ai'+(m.error?" err":"")+(m.id===streamId?" streaming":"")+inCls+(isLastAI?" last":"")+'" data-id="'+m.id+'"><div class="av">'+ico("sparkles")+'</div><div class="ai-body"><div class="who"><b>NOVA AI</b>'+(time?"<span>"+time+"</span>":"")+"</div>"+body+'<div class="acts">'+acts+"</div></div></div>";
 }
 function typingHTML(){
   return '<div class="msg ai in" id="typing"><div class="av pulse">'+ico("sparkles")+'</div><div class="ai-body"><div class="who"><b>'+MODES[genMode].busy+'</b></div><div class="dots"><i></i><i></i><i></i></div></div></div>';
@@ -770,9 +773,9 @@ function renderMessages(o={}){
   if(!chat||!chat.messages.length){box.innerHTML=welcomeHTML();area.scrollTop=0;updateToBottom();return}
   const animFrom=o.animFrom==null?1e9:o.animFrom;
   let lastAI=-1;for(let k=chat.messages.length-1;k>=0;k--){if(chat.messages[k].role==="assistant"){lastAI=k;break}}
-  const showBusy=busy&&genChatId===chat.id;
+  const showBusy=busy&&genChatId===chat.id&&!streamId;
   let html="";
-  chat.messages.forEach((m,idx)=>{html+=msgHTML(m,idx,animFrom,idx===lastAI&&!showBusy&&idx===chat.messages.length-1)});
+  chat.messages.forEach((m,idx)=>{html+=msgHTML(m,idx,animFrom,idx===lastAI&&!showBusy&&!streamId&&idx===chat.messages.length-1)});
   if(showBusy)html+=typingHTML();
   box.innerHTML=html;
   if(o.keep)area.scrollTop=prev;
@@ -868,7 +871,7 @@ function setLoading(v){
 }
 function updateSendState(){$("sendBtn").disabled=!busy&&!$("prompt").value.trim()&&!attachedImage&&!attachedFiles.length}
 function onSendClick(){if(busy){stopGen();return}sendMessage()}
-function stopGen(){genToken++;setLoading(false);renderMessages({keep:true})}
+function stopGen(){genToken++;streamId=null;setLoading(false);saveDB();renderMessages({keep:true})}
 function makeThumb(src){
   return new Promise(res=>{
     const img=new Image();
@@ -906,7 +909,7 @@ async function runAssistant(chat,animFromUser){
   const lastUser=[...chat.messages].reverse().find(m=>m.role==="user");
   const text=lastUser?lastUser.content:"";
   const mode=activeMode,selectedModel=$("model").value,media=selectedMediaModel;
-  let reply;
+  let reply,streamMsg=null;
   try{
     const refImg=await getMsgImage(lastUser);
     if(mode==="image"){
@@ -945,18 +948,48 @@ async function runAssistant(chat,animFromUser){
     }else{
       const ctx=chat.messages.filter(m=>!m.error&&m.content).map(m=>({role:m.role,content:withFiles(m)}));
       const messages=[{role:"system",content:identityPrompt(selectedModel)+"\n\n"+database.systemPrompt},...ctx];
-      const r=refImg?await puter.ai.chat(messages,refImg,{model:selectedModel}):await puter.ai.chat(messages,{model:selectedModel});
-      reply={role:"assistant",content:getResponseText(r)};
+      const r=refImg?await puter.ai.chat(messages,refImg,{model:selectedModel,stream:true}):await puter.ai.chat(messages,{model:selectedModel,stream:true});
+      if(r&&typeof r[Symbol.asyncIterator]==="function"){
+        let acc="",pend=false;
+        const paint=()=>{
+          pend=false;if(!streamMsg||currentId!==chat.id)return;
+          const el=document.querySelector('#messages .msg[data-id="'+streamMsg.id+'"] .md');if(!el)return;
+          const a=$("chatArea"),stick=a.scrollHeight-a.scrollTop-a.clientHeight<140;
+          el.innerHTML=md(streamMsg.content);if(stick)a.scrollTop=a.scrollHeight;
+        };
+        for await(const part of r){
+          if(token!==genToken)return;
+          const t=typeof part==="string"?part:((part&&part.text)||"");
+          if(!t)continue;
+          acc+=t;
+          if(!streamMsg){
+            streamMsg={id:uid(),role:"assistant",content:acc,ts:Date.now()};
+            chat.messages.push(streamMsg);streamId=streamMsg.id;
+            if(currentId===chat.id)renderMessages();
+          }else{
+            streamMsg.content=acc;
+            if(!pend){pend=true;requestAnimationFrame(paint)}
+          }
+        }
+        if(token!==genToken)return;
+        if(!streamMsg){reply={role:"assistant",content:"پاسخی دریافت نشد."}}
+        else{streamMsg.content=acc;reply=streamMsg}
+      }else{
+        reply={role:"assistant",content:getResponseText(r)};
+      }
     }
   }catch(error){
     const detail=(error&&(error.message||error.msg))||(typeof error==="string"?error:JSON.stringify(error||{}));
+    if(streamMsg&&streamMsg.content){reply=streamMsg;toast("ارتباط وسط پاسخ قطع شد؛ متن ناقص ذخیره شد.",{type:"error"})}
+    else{
     const lowBal=/insufficient|low[\s_-]*balance|not enough|credit|funds|اعتبار/i.test(detail+" "+(error&&error.code||""));
     if(lowBal){reply={role:"assistant",error:true,content:"اعتبار اکانت Puter برای این مدل کافی نیست (Low balance). این مدل‌ها هزینه‌ی بیشتری دارن؛ یه مدل ارزون‌تر یا سبک‌تر انتخاب کن، یا اعتبار اکانت رو تو puter.com چک کن.\n\nجزئیات: "+detail}}
     else reply={role:"assistant",error:true,content:"خطا در اجرای ابزار هوش مصنوعی:\n"+detail+"\n\nمدل انتخاب‌شده ممکنه موقتاً در دسترس نباشه یا این قابلیت رو پشتیبانی نکنه. می‌تونی با دکمه تولید دوباره امتحان کنی."};
+    }
   }
   if(token!==genToken)return;
-  reply.id=uid();reply.ts=Date.now();
-  chat.messages.push(reply);chat.updated=Date.now();
+  if(!chat.messages.includes(reply)){reply.id=uid();reply.ts=Date.now();chat.messages.push(reply)}
+  streamId=null;chat.updated=Date.now();
   setLoading(false);saveDB();renderHistory();
   if(currentId===chat.id)renderMessages({animFrom:chat.messages.length-1,focusId:reply.id});
 }
