@@ -496,6 +496,15 @@ html{overflow:hidden;overscroll-behavior:none}
 const $=id=>document.getElementById(id);
 const STORAGE_KEY="nova_ai_data_v1";
 const DEFAULT_SYS="تو یک دستیار هوشمند، دقیق و دوستانه هستی. به زبان کاربر پاسخ بده.";
+function identityPrompt(modelId){
+  const m=(typeof availableModels!=="undefined"&&availableModels.find(x=>(x.puterId||x.id)===modelId))||null;
+  const real=m?((m.name||m.id)+(m.id&&m.name&&m.name!==m.id?" ("+(m.puterId||m.id)+")":"")):(modelId||"نامشخص");
+  return "هویت تو:\n"+
+  "- اسم تو «Nova AI» است.\n"+
+  "- Nova AI را «امیرعلی»، یک نوجوان نابغه‌ی ایرانی ساخته است. امیرعلی صاحب شرکت «نوافورج» (NovaForge) هم هست. اگر کسی پرسید سازنده‌ات کیه یا کی ساختت، بگو امیرعلی و همین توضیحات را درباره‌اش بگو.\n"+
+  "- اگر کسی پرسید چه مدلی هستی یا زیر پوست Nova AI کدوم مدل کار می‌کنه، اسم دقیق همین مدل را بگو: "+real+". این را انکار نکن و اسم مدل دیگری هم نگو.\n"+
+  "- امیرعلی اپ Nova AI را ساخته؛ نگو که خودش مدل پایه را آموزش داده یا ساخته.";
+}
 const uid=()=>Date.now().toString(36)+Math.random().toString(36).slice(2,7);
 const timeFmt=new Intl.DateTimeFormat("fa-IR",{hour:"2-digit",minute:"2-digit"});
 const MODES={
@@ -503,7 +512,7 @@ const MODES={
   search:{icon:"globe",label:"جستجوی وب",ph:"سؤالت رو برای جستجوی وب بنویس...",busy:"در حال جستجو..."},
   image:{icon:"image",label:"ساخت تصویر",ph:"توضیح تصویری که می‌خوای ساخته بشه...",busy:"در حال ساخت تصویر..."},
   video:{icon:"video",label:"ساخت ویدیو",ph:"صحنه و حرکت ویدیویی که می‌خوای بسازی...",busy:"در حال ساخت ویدیو (ممکنه کمی طول بکشه)..."},
-  audio:{icon:"volume",label:"متن به صدا",ph:"متنی که می‌خوای به صدا تبدیل بشه...",busy:"در حال ساخت صدا..."}
+  audio:{icon:"volume",label:"متن به صدا",ph:"توضیح بده چی گفته بشه... (برای عین‌خوانی اولش = بذار)",busy:"در حال ساخت صدا..."}
 };
 
 let database={chats:[],systemPrompt:DEFAULT_SYS};
@@ -918,17 +927,32 @@ async function runAssistant(chat,animFromUser){
       if(!u)throw new Error("خروجی ویدیو خالی برگشت.");
       reply={role:"assistant",content:"ویدیو آماده شد.",mediaType:"video",mediaUrl:u};
     }else if(mode==="audio"){
-      const a=await puter.ai.txt2speech(text,{...media.tts});
-      reply={role:"assistant",content:"فایل صوتی آماده شد.",mediaType:"audio",mediaUrl:a?.src||a?.currentSrc||""};
+      let spoken=text.trim();
+      if(/^\s*[=＝]/.test(text)){
+        spoken=text.replace(/^\s*[=＝]\s*/,"");
+      }else{
+        const g=await puter.ai.chat([
+          {role:"system",content:"You write the exact script that a text-to-speech voice will read aloud. The user describes what they want said (topic, purpose, tone, length, language). Write that script. Output ONLY the spoken words: no title, no markdown, no emojis, no stage directions, no quotation marks, no explanation. Reply in the same language the user wrote in unless they ask for another one. Keep it under about 1500 characters unless the user asks for longer. If the user already wrote the exact text to be read, return it unchanged."},
+          {role:"user",content:text}
+        ],{model:selectedModel});
+        spoken=getResponseText(g).trim()||text.trim();
+      }
+      spoken=spoken.slice(0,2900);
+      const a=await puter.ai.txt2speech(spoken,{...media.tts});
+      const au=a?.src||a?.currentSrc||"";
+      if(!au)throw new Error("خروجی صوتی خالی برگشت.");
+      reply={role:"assistant",content:spoken,mediaType:"audio",mediaUrl:au};
     }else{
       const ctx=chat.messages.filter(m=>!m.error&&m.content).map(m=>({role:m.role,content:withFiles(m)}));
-      const messages=[{role:"system",content:database.systemPrompt},...ctx];
+      const messages=[{role:"system",content:identityPrompt(selectedModel)+"\n\n"+database.systemPrompt},...ctx];
       const r=refImg?await puter.ai.chat(messages,refImg,{model:selectedModel}):await puter.ai.chat(messages,{model:selectedModel});
       reply={role:"assistant",content:getResponseText(r)};
     }
   }catch(error){
     const detail=(error&&(error.message||error.msg))||(typeof error==="string"?error:JSON.stringify(error||{}));
-    reply={role:"assistant",error:true,content:"خطا در اجرای ابزار هوش مصنوعی:\n"+detail+"\n\nمدل انتخاب‌شده ممکنه موقتاً در دسترس نباشه یا این قابلیت رو پشتیبانی نکنه. می‌تونی با دکمه تولید دوباره امتحان کنی."};
+    const lowBal=/insufficient|low[\s_-]*balance|not enough|credit|funds|اعتبار/i.test(detail+" "+(error&&error.code||""));
+    if(lowBal){reply={role:"assistant",error:true,content:"اعتبار اکانت Puter برای این مدل کافی نیست (Low balance). این مدل‌ها هزینه‌ی بیشتری دارن؛ یه مدل ارزون‌تر یا سبک‌تر انتخاب کن، یا اعتبار اکانت رو تو puter.com چک کن.\n\nجزئیات: "+detail}}
+    else reply={role:"assistant",error:true,content:"خطا در اجرای ابزار هوش مصنوعی:\n"+detail+"\n\nمدل انتخاب‌شده ممکنه موقتاً در دسترس نباشه یا این قابلیت رو پشتیبانی نکنه. می‌تونی با دکمه تولید دوباره امتحان کنی."};
   }
   if(token!==genToken)return;
   reply.id=uid();reply.ts=Date.now();
