@@ -1059,7 +1059,15 @@ document.addEventListener("keydown",e=>{
 });
 async function refreshAccount(){
   const el=$("accName");
-  try{const u=await puter.auth.getUser();el.textContent=u&&(u.username||u.email)||"وارد شده"}catch(e){el.textContent="وارد نشده"}
+  el.textContent="در حال بررسی...";
+  try{
+    if(!window.puter?.auth)throw new Error("Puter بارگذاری نشده");
+    const u=await Promise.race([puter.auth.getUser(),new Promise((_,rej)=>setTimeout(()=>rej(new Error("پاسخ نیومد")),8000))]);
+    el.textContent=(u&&(u.username||u.email))||"وارد شده (اسم نامشخص)";
+  }catch(e){
+    const signed=!!(window.puter?.auth?.isSignedIn&&puter.auth.isSignedIn());
+    el.textContent=signed?"نامشخص — ورود قدیمی؛ «تغییر حساب» رو بزن":"وارد نشده";
+  }
 }
 async function switchAccount(){
   try{await puter.auth.signOut()}catch(e){console.warn(e)}
